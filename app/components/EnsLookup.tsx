@@ -3,22 +3,106 @@
 import { useMemo, useState } from "react";
 import { ethers } from "ethers";
 
+type EnsTextRecords = {
+  url?: string | null;
+  description?: string | null;
+  twitter?: string | null;
+  github?: string | null;
+  discord?: string | null;
+  email?: string | null;
+  telegram?: string | null;
+};
+
 type Result = {
   input: string;
   ensName: string | null;
   address: string | null;
   avatarUrl: string | null;
+  records: EnsTextRecords | null;
   error: string | null;
 };
 
+const TEXT_KEYS: Array<{ key: string; field: keyof EnsTextRecords; label: string }> = [
+  { key: "url", field: "url", label: "Website" },
+  { key: "description", field: "description", label: "Description" },
+  { key: "com.twitter", field: "twitter", label: "Twitter" },
+  { key: "com.github", field: "github", label: "GitHub" },
+  { key: "com.discord", field: "discord", label: "Discord" },
+  { key: "email", field: "email", label: "Email" },
+  { key: "com.telegram", field: "telegram", label: "Telegram" },
+];
+
+function normalizeSocialHandle(value: string, kind: keyof EnsTextRecords) {
+  const v = value.trim();
+  if (!v) return v;
+
+  // keep URLs as-is
+  if (/^https?:\/\//i.test(v)) return v;
+
+  // common handles
+  if (kind === "twitter") return v.replace(/^@/, "");
+  if (kind === "github") return v.replace(/^@/, "");
+  if (kind === "telegram") return v.replace(/^@/, "");
+
+  return v;
+}
+
+function toLink(value: string, kind: keyof EnsTextRecords) {
+  const v = value.trim();
+  if (!v) return null;
+
+  if (/^https?:\/\//i.test(v)) return v;
+
+  if (kind === "url") return `https://${v.replace(/^\/\//, "")}`;
+  if (kind === "twitter") return `https://twitter.com/${normalizeSocialHandle(v, kind)}`;
+  if (kind === "github") return `https://github.com/${normalizeSocialHandle(v, kind)}`;
+  if (kind === "telegram") return `https://t.me/${normalizeSocialHandle(v, kind)}`;
+  if (kind === "email") return `mailto:${v}`;
+
+  // discord is not reliably linkable; keep plain
+  return null;
+}
+
 export default function EnsLookup() {
   const provider = useMemo(() => {
+    // ENS lives on Ethereum mainnet
     return new ethers.JsonRpcProvider("https://ethereum.publicnode.com");
   }, []);
 
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
+
+  async function fetchEnsProfile(name: string) {
+    let avatarUrl: string | null = null;
+    let records: EnsTextRecords = {};
+
+    const resolver = await provider.getResolver(name);
+    if (!resolver) {
+      return { avatarUrl: null, records: null as EnsTextRecords | null };
+    }
+
+    // Avatar can revert depending on resolver/record
+    try {
+      avatarUrl = await resolver.getAvatar();
+    } catch {
+      avatarUrl = null;
+    }
+
+    // Fetch text records (each can revert depending on resolver)
+    await Promise.all(
+      TEXT_KEYS.map(async ({ key, field }) => {
+        try {
+          const val = await resolver.getText(key);
+          records[field] = val && val.trim().length ? val : null;
+        } catch {
+          records[field] = null;
+        }
+      })
+    );
+
+    return { avatarUrl, records };
+  }
 
   async function lookup() {
     const input = text.trim();
@@ -31,30 +115,35 @@ export default function EnsLookup() {
       let ensName: string | null = null;
       let address: string | null = null;
       let avatarUrl: string | null = null;
+      let records: EnsTextRecords | null = null;
 
       if (ethers.isAddress(input)) {
         address = ethers.getAddress(input);
         ensName = await provider.lookupAddress(address);
 
         if (ensName) {
-          const resolver = await provider.getResolver(ensName);
-          avatarUrl = resolver ? await resolver.getAvatar() : null;
+          const profile = await fetchEnsProfile(ensName);
+          avatarUrl = profile.avatarUrl;
+          records = profile.records;
         }
       } else {
         ensName = input;
         address = await provider.resolveName(ensName);
 
-        const resolver = await provider.getResolver(ensName);
-        avatarUrl = resolver ? await resolver.getAvatar() : null;
+        // Even if address is null, the name could still have records; try anyway.
+        const profile = await fetchEnsProfile(ensName);
+        avatarUrl = profile.avatarUrl;
+        records = profile.records;
       }
 
-      setResult({ input, ensName, address, avatarUrl, error: null });
+      setResult({ input, ensName, address, avatarUrl, records, error: null });
     } catch (e: any) {
       setResult({
         input,
         ensName: null,
         address: null,
         avatarUrl: null,
+        records: null,
         error: e?.message ?? "Unknown error",
       });
     } finally {
@@ -68,6 +157,10 @@ export default function EnsLookup() {
     }
   };
 
+  const hasRecords =
+    !!result?.records &&
+    Object.values(result.records).some((v) => typeof v === "string" && v.trim().length > 0);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center p-4 relative overflow-hidden">
       {/* Animated Background */}
@@ -75,7 +168,7 @@ export default function EnsLookup() {
         <div className="absolute top-20 left-10 w-72 h-72 bg-blue-200/30 rounded-full blur-3xl animate-float" />
         <div className="absolute bottom-20 right-10 w-96 h-96 bg-purple-200/30 rounded-full blur-3xl animate-float-delayed" />
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-indigo-200/20 rounded-full blur-3xl animate-pulse-slow" />
-        
+
         {/* Floating Shapes */}
         <div className="absolute top-1/4 left-1/4 w-4 h-4 bg-blue-400/40 rounded-full animate-float-up" />
         <div className="absolute top-1/3 right-1/4 w-3 h-3 bg-purple-400/40 rounded-full animate-float-up-delayed" />
@@ -87,12 +180,7 @@ export default function EnsLookup() {
         {/* Header */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-500 rounded-2xl mb-4">
-            <svg
-              className="w-8 h-8 text-white"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
+            <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -102,9 +190,7 @@ export default function EnsLookup() {
             </svg>
           </div>
           <h1 className="text-3xl font-bold text-slate-900 mb-2">ENS Lookup</h1>
-          <p className="text-slate-500 text-sm">
-            Recherchez un nom ENS ou une adresse Ethereum
-          </p>
+          <p className="text-slate-500 text-sm">Recherchez un nom ENS ou une adresse Ethereum</p>
         </div>
 
         {/* Search Card */}
@@ -123,19 +209,8 @@ export default function EnsLookup() {
               className="px-6 py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-200 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all active:scale-95 disabled:active:scale-100"
             >
               {loading ? (
-                <svg
-                  className="animate-spin h-5 w-5"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
+                <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path
                     className="opacity-75"
                     fill="currentColor"
@@ -143,12 +218,7 @@ export default function EnsLookup() {
                   />
                 </svg>
               ) : (
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -167,12 +237,7 @@ export default function EnsLookup() {
             {result.error ? (
               <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
-                  <svg
-                    className="w-5 h-5 text-red-500"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
+                  <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"
@@ -192,17 +257,9 @@ export default function EnsLookup() {
                 <div className="flex items-center gap-4">
                   <div className="w-16 h-16 bg-gradient-to-br from-blue-100 to-blue-200 rounded-2xl overflow-hidden flex-shrink-0 flex items-center justify-center">
                     {result.avatarUrl ? (
-                      <img
-                        src={result.avatarUrl}
-                        alt="avatar"
-                        className="w-full h-full object-cover"
-                      />
+                      <img src={result.avatarUrl} alt="avatar" className="w-full h-full object-cover" />
                     ) : (
-                      <svg
-                        className="w-8 h-8 text-blue-400"
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
+                      <svg className="w-8 h-8 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
                         <path
                           fillRule="evenodd"
                           d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z"
@@ -212,12 +269,8 @@ export default function EnsLookup() {
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">
-                      Profil trouvé
-                    </p>
-                    <p className="text-lg font-semibold text-slate-900 truncate">
-                      {result.ensName || "Aucun ENS"}
-                    </p>
+                    <p className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-1">Profil trouvé</p>
+                    <p className="text-lg font-semibold text-slate-900 truncate">{result.ensName || "Aucun ENS"}</p>
                   </div>
                 </div>
 
@@ -225,22 +278,57 @@ export default function EnsLookup() {
                 <div className="space-y-3 pt-3 border-t border-slate-100">
                   {result.ensName && (
                     <div>
-                      <p className="text-xs font-medium text-slate-500 mb-1">
-                        Nom ENS
-                      </p>
+                      <p className="text-xs font-medium text-slate-500 mb-1">Nom ENS</p>
                       <p className="text-sm text-slate-900 font-mono bg-slate-50 px-3 py-2 rounded-lg">
                         {result.ensName}
                       </p>
                     </div>
                   )}
+
                   {result.address && (
                     <div>
-                      <p className="text-xs font-medium text-slate-500 mb-1">
-                        Adresse
-                      </p>
+                      <p className="text-xs font-medium text-slate-500 mb-1">Adresse</p>
                       <p className="text-sm text-slate-900 font-mono bg-slate-50 px-3 py-2 rounded-lg break-all">
                         {result.address}
                       </p>
+                    </div>
+                  )}
+
+                  {hasRecords && (
+                    <div className="pt-2">
+                      <p className="text-xs font-medium text-slate-500 mb-2">Text records</p>
+
+                      <div className="space-y-2">
+                        {TEXT_KEYS.map(({ field, label }) => {
+                          const val = result.records?.[field];
+                          if (!val) return null;
+
+                          const link = toLink(val, field);
+                          const display =
+                            field === "twitter" || field === "github" || field === "telegram"
+                              ? normalizeSocialHandle(val, field)
+                              : val;
+
+                          return (
+                            <div key={field} className="bg-slate-50 px-3 py-2 rounded-lg">
+                              <p className="text-[11px] font-medium text-slate-500 mb-1">{label}</p>
+
+                              {link ? (
+                                <a
+                                  href={link}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-sm text-slate-900 underline decoration-slate-300 break-all"
+                                >
+                                  {display}
+                                </a>
+                              ) : (
+                                <p className="text-sm text-slate-900 break-all">{display}</p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -266,7 +354,8 @@ export default function EnsLookup() {
         }
 
         @keyframes float {
-          0%, 100% {
+          0%,
+          100% {
             transform: translate(0, 0) scale(1);
           }
           33% {
@@ -278,7 +367,8 @@ export default function EnsLookup() {
         }
 
         @keyframes float-delayed {
-          0%, 100% {
+          0%,
+          100% {
             transform: translate(0, 0) scale(1);
           }
           33% {
@@ -304,7 +394,8 @@ export default function EnsLookup() {
         }
 
         @keyframes pulse-slow {
-          0%, 100% {
+          0%,
+          100% {
             opacity: 0.3;
             transform: translate(-50%, -50%) scale(1);
           }
